@@ -1,0 +1,8 @@
+# Copy to .dev.vars; replace the token before use. Never commit .dev.vars.
+RPC_TOKEN=""
+EGRESS_PROXY_SERVER="http://isp.decodo.com:10001"
+EGRESS_PROXY_USERNAME=""
+EGRESS_PROXY_PASSWORD=""
+HTTP_TARGETS='{"example":{"url":"https://example.com/"},"egress":{"url":"https://ip.decodo.com/json"}}'
+SSH_TARGETS='{}'
+BROWSER_TARGETS='{"example":{"url":"https://example.com/"},"egress":{"url":"https://ip.decodo.com/json","settleMs":0}}'
