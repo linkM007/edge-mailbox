@@ -1,6 +1,7 @@
 import net from 'node:net';
 import tls from 'node:tls';
 import { JobError } from '../src/protocol.js';
+
 const credentials = proxy => 'Basic ' + Buffer.from(proxy.username + ':' + proxy.password).toString('base64');
 
 export function proxyTunnel(hostname, port, proxy, signal) {
@@ -37,6 +38,27 @@ export function proxyTunnel(hostname, port, proxy, signal) {
     socket.once(endpoint.protocol === 'https:' ? 'secureConnect' : 'connect', () => {
       socket.write('CONNECT ' + hostname + ':' + port + ' HTTP/1.1\r\nHost: ' + hostname + ':' + port +
         '\r\nProxy-Authorization: ' + credentials(proxy) + '\r\n\r\n');
+    });
+    if (signal?.aborted) abort();
+  });
+}
+
+export function directTunnel(hostname, port, signal) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: hostname, port: Number(port) });
+    let settled = false;
+    const fail = code => { if (settled) return; settled = true; socket.destroy(); reject(new JobError(code, 502)); };
+    const abort = () => { if (settled) socket.destroy(); else fail('job_timeout'); };
+    signal?.addEventListener('abort', abort, { once: true });
+    socket.once('close', () => { signal?.removeEventListener('abort', abort); if (!settled) fail('ssh_connect_closed'); });
+    socket.on('error', () => fail('ssh_connect_failed'));
+    socket.setTimeout(5000, () => fail('ssh_connect_timeout'));
+    socket.once('connect', () => {
+      if (settled) return;
+      settled = true;
+      socket.setTimeout(0);
+      socket.pause();
+      resolve(socket);
     });
     if (signal?.aborted) abort();
   });

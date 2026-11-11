@@ -1,6 +1,6 @@
 import { EnvHttpProxyAgent, ProxyAgent, fetch } from 'undici';
-import { INSERT_JOB, SELECT_JOB } from '../src/mailbox.js';
-import { publicJob, readLimited, validateId, validateJob } from '../src/protocol.js';
+import { CANCEL_JOB, INSERT_JOB, LIST_JOBS_ALL, LIST_JOBS_BY_STATUS, SELECT_JOB } from '../src/mailbox.js';
+import { JOB_STATUSES, publicJob, publicJobSummary, readLimited, validateId, validateJob } from '../src/protocol.js';
 
 export function createDispatcher(env = process.env) {
   const httpProxy = env.http_proxy || env.HTTP_PROXY;
@@ -41,12 +41,25 @@ export function createClient({ plane = 'data', env = process.env, dispatcher, re
     base = `https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${database}/query`;
     token = required(env, 'CLOUDFLARE_API_TOKEN');
   }
-  async function send(url, { method = 'GET', body, headers = {} } = {}) {
+
+  async function send(url, { method = 'GET', body, headers = {}, auth = true } = {}) {
     let response;
     try {
-      response = await request(url, { method, redirect: 'manual', dispatcher,
+      const mergedHeaders = {
+        ...(auth ? { authorization: `Bearer ${token}` } : {}),
+        ...(body !== undefined || method === 'POST' ? { 'content-type': 'application/json' } : {}),
+        ...headers,
+      };
+      // Preserve exact header contract expected by existing callers/tests.
+      if (auth && mergedHeaders['content-type'] === undefined) {
+        mergedHeaders['content-type'] = 'application/json';
+      }
+      response = await request(url, {
+        method,
+        redirect: 'manual',
+        dispatcher,
         signal: AbortSignal.timeout(60000),
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', ...headers },
+        headers: mergedHeaders,
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch { throw new Error('network_request_failed'); }
@@ -57,6 +70,7 @@ export function createClient({ plane = 'data', env = process.env, dispatcher, re
     try { return JSON.parse(new TextDecoder().decode(await readLimited(response.body, 1048576))); }
     catch { throw new Error('invalid_remote_response'); }
   }
+
   async function query(sql, params) {
     const data = await send(base, { method: 'POST', body: { sql, params } });
     if (data.success !== true || !Array.isArray(data.result) ||
@@ -66,16 +80,34 @@ export function createClient({ plane = 'data', env = process.env, dispatcher, re
     }
     return data.result[0].results ?? [];
   }
+
   return {
+    async health() {
+      if (plane !== 'data') throw new Error('control_plane_has_no_health_endpoint');
+      return send(`${base}/healthz`, { auth: false });
+    },
+    async targets() {
+      if (plane !== 'data') throw new Error('control_plane_has_no_targets_endpoint');
+      return send(`${base}/v1/targets`);
+    },
+    async dispatch() {
+      if (plane !== 'data') throw new Error('control_plane_is_asynchronous');
+      return send(`${base}/v1/dispatch`, { method: 'POST', body: {} });
+    },
     async run(input) {
       if (plane !== 'data') throw new Error('control_plane_is_asynchronous');
       return send(`${base}/v1/run`, { method: 'POST', body: validateJob(input) });
     },
-    async enqueue(input, id) {
+    async enqueue(input, id, { immediate = false } = {}) {
       const payload = validateJob(input);
       validateId(id);
-      if (plane === 'data') return send(`${base}/v1/jobs`, { method: 'POST',
-        body: payload, headers: { 'idempotency-key': id } });
+      if (plane === 'data') {
+        const headers = {
+          'idempotency-key': id,
+          ...(immediate ? { 'x-edge-dispatch': 'immediate' } : {}),
+        };
+        return send(`${base}/v1/jobs`, { method: 'POST', body: payload, headers });
+      }
       const encoded = JSON.stringify(payload);
       await query(INSERT_JOB, [id, encoded]);
       const [row] = await query(SELECT_JOB, [id]);
@@ -86,6 +118,28 @@ export function createClient({ plane = 'data', env = process.env, dispatcher, re
     async result(id) {
       validateId(id);
       if (plane === 'data') return send(`${base}/v1/jobs/${id}`);
+      const [row] = await query(SELECT_JOB, [id]);
+      if (!row) throw new Error('job_not_found');
+      return publicJob(row);
+    },
+    async list({ status, limit = 20 } = {}) {
+      if (status !== undefined && !JOB_STATUSES.includes(status)) throw new Error('invalid_status_filter');
+      const parsedLimit = Number(limit);
+      if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) throw new Error('invalid_limit');
+      if (plane === 'data') {
+        const params = new URLSearchParams({ limit: String(parsedLimit) });
+        if (status !== undefined) params.set('status', status);
+        return send(`${base}/v1/jobs?${params.toString()}`);
+      }
+      const rows = status === undefined
+        ? await query(LIST_JOBS_ALL, [parsedLimit])
+        : await query(LIST_JOBS_BY_STATUS, [status, parsedLimit]);
+      return { jobs: rows.map(publicJobSummary) };
+    },
+    async cancel(id) {
+      validateId(id);
+      if (plane === 'data') return send(`${base}/v1/jobs/${id}/cancel`, { method: 'POST', body: {} });
+      await query(CANCEL_JOB, [id]);
       const [row] = await query(SELECT_JOB, [id]);
       if (!row) throw new Error('job_not_found');
       return publicJob(row);

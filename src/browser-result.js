@@ -7,6 +7,10 @@ export function validateBrowserResult(result) {
       !Number.isInteger(result.status) || result.status < 100 || result.status > 599 ||
       typeof result.title !== 'string' || result.title.length > 512 ||
       typeof result.text !== 'string' || result.text.length > 18000 ||
+      (result.selectedText !== undefined && result.selectedText !== null &&
+        (typeof result.selectedText !== 'string' || result.selectedText.length > 18000)) ||
+      (result.failedSubresources !== undefined && (!Number.isInteger(result.failedSubresources) || result.failedSubresources < 0)) ||
+      (result.redirectCount !== undefined && (!Number.isInteger(result.redirectCount) || result.redirectCount < 0)) ||
       !Array.isArray(result.links) || result.links.length > 30 ||
       !result.links.every(link => typeof link?.text === 'string' && link.text.length <= 120 &&
         typeof link.href === 'string' && link.href.length <= 1024 && typeof link.path === 'string' &&
