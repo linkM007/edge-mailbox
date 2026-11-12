@@ -1,5 +1,6 @@
 import { JobError } from '../src/protocol.js';
 import { validateBrowserResult } from '../src/browser-result.js';
+import { publicHttpsUrl } from '../src/url-policy.js';
 import { resolveBrowserJob, requestAllowed } from './config.js';
 import { createProxySession } from './proxy.js';
 
@@ -48,6 +49,12 @@ export async function browse(input, config, { launch, timeoutMs = 40000, signal,
     session = createProxySession(target.proxy);
     return (url, _proxy, options) => session.fetch(url, options);
   })();
+  const originPermitted = urlStr => {
+    try {
+      const parsed = publicHttpsUrl(urlStr);
+      return target.allowAnyPublicOrigin ? true : target.resourceOrigins.has(parsed.origin);
+    } catch { return false; }
+  };
   const operation = async () => {
     if (stopped) throw new JobError('browser_timeout', 504);
     browser = await launch({
@@ -97,13 +104,8 @@ export async function browse(input, config, { launch, timeoutMs = 40000, signal,
             const resType = request.resourceType();
             const reqOrigin = new URL(request.url()).origin;
             let validatedOrigin;
-            if (reqHeaders.origin && reqHeaders.origin.length <= 256) {
-              try {
-                const origUrl = new URL(reqHeaders.origin);
-                if (origUrl.protocol === 'https:' && target.resourceOrigins.has(origUrl.origin)) {
-                  validatedOrigin = origUrl.origin;
-                }
-              } catch {}
+            if (reqHeaders.origin && reqHeaders.origin.length <= 256 && originPermitted(reqHeaders.origin)) {
+              validatedOrigin = new URL(reqHeaders.origin).origin;
             }
             const destMap = { script: 'script', stylesheet: 'style', image: 'image', font: 'font', document: 'iframe' };
             const secFetchDest = reqHeaders['sec-fetch-dest'] ?? (topNavigation ? 'document' : (destMap[resType] ?? 'empty'));
@@ -126,20 +128,18 @@ export async function browse(input, config, { launch, timeoutMs = 40000, signal,
               ...(topNavigation ? { 'sec-fetch-user': reqHeaders['sec-fetch-user'] ?? '?1', 'upgrade-insecure-requests': '1' } : {}),
               ...(validatedOrigin ? { origin: validatedOrigin } : {}),
             };
-            if (reqHeaders.referer && reqHeaders.referer.length <= 512) {
-              try {
-                const refUrl = new URL(reqHeaders.referer);
-                if (refUrl.protocol === 'https:' && target.resourceOrigins.has(refUrl.origin)) {
-                  outboundHeaders.referer = refUrl.href;
-                }
-              } catch {}
+            if (reqHeaders.referer && reqHeaders.referer.length <= 512 && originPermitted(reqHeaders.referer)) {
+              outboundHeaders.referer = new URL(reqHeaders.referer).href;
             }
+            const allowedOrigins = target.allowAnyPublicOrigin
+              ? null
+              : (topNavigation ? new Set([target.origin]) : target.resourceOrigins);
             const response = await dispatchResource(request.url(), target.proxy, {
               signal: controller.signal,
               limit: Math.min(MAX_RESOURCE_BYTES, remaining),
               budget: byteBudget,
               maxRedirects: target.maxRedirects,
-              allowedOrigins: topNavigation ? new Set([target.origin]) : target.resourceOrigins,
+              allowedOrigins,
               headers: outboundHeaders,
             });
             redirectCount += response.redirectCount ?? 0;
@@ -211,7 +211,12 @@ export async function browse(input, config, { launch, timeoutMs = 40000, signal,
       if (screenshot.byteLength <= 245760) break;
     }
     if (budgetExceeded) throw new JobError('size_limit_exceeded', 413);
-    if (topBlocked || new URL(snapshot.url).origin !== target.origin) throw new JobError('navigation_blocked', 403);
+    if (topBlocked) throw new JobError('navigation_blocked', 403);
+    if (target.allowAnyPublicOrigin) {
+      try { publicHttpsUrl(snapshot.url); } catch { throw new JobError('navigation_blocked', 403); }
+    } else if (new URL(snapshot.url).origin !== target.origin) {
+      throw new JobError('navigation_blocked', 403);
+    }
     if (screenshot.byteLength > 245760) throw new JobError('size_limit_exceeded', 413);
     return validateBrowserResult({
       type: 'browse',

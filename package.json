@@ -1,6 +1,6 @@
 {
   "name": "edge-mailbox",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Cloudflare-native HTTP, browser and SSH task runner with mandatory proxy egress and a D1 mailbox",
   "type": "module",

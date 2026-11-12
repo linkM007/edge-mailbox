@@ -42,6 +42,46 @@ export async function handleRequest(request, env, execute = executeJob, ctx = nu
     if (path === '/v1/targets' && request.method === 'GET') {
       return json({ requestId, targets: listTargets(env) });
     }
+    if (path === '/v1/http' && (request.method === 'GET' || request.method === 'HEAD')) {
+      const targetUrl = url.searchParams.get('url') ?? undefined;
+      const targetName = url.searchParams.get('target') ?? undefined;
+      const relPath = url.searchParams.get('path') ?? undefined;
+      const follow = url.searchParams.get('follow');
+      const maxBytesParam = url.searchParams.get('maxBytes');
+      const truncateParam = url.searchParams.get('truncate');
+      const proxyName = url.searchParams.get('proxy') ?? undefined;
+      const raw = url.searchParams.get('raw') === '1';
+      const input = {
+        type: 'http',
+        method: request.method,
+        ...(targetUrl !== undefined ? { target: '_url', url: targetUrl } : {}),
+        ...(targetName !== undefined ? { target: targetName } : {}),
+        ...(relPath !== undefined ? { path: relPath } : {}),
+        ...(follow !== null ? { followRedirects: follow !== '0' && follow !== 'false' } : {}),
+        maxBytes: maxBytesParam !== null ? Number(maxBytesParam) : 262144,
+        truncate: truncateParam === null ? true : (truncateParam !== '0' && truncateParam !== 'false'),
+        ...(proxyName !== undefined ? { proxy: proxyName } : {}),
+      };
+      resolveJob(input, env);
+      const result = await execute(input, env);
+      if (raw) {
+        const bytes = Uint8Array.from(atob(result.body), c => c.charCodeAt(0));
+        return new Response(request.method === 'HEAD' ? null : bytes, {
+          status: result.status,
+          headers: {
+            'cache-control': 'no-store',
+            'x-content-type-options': 'nosniff',
+            'content-type': result.contentType ?? 'application/octet-stream',
+            'x-edge-request-id': requestId,
+            'x-edge-final-url': result.url,
+            'x-edge-redirect-count': String(result.redirectCount ?? 0),
+            'x-edge-truncated': String(Boolean(result.bodyTruncated)),
+            'x-edge-proxy-used': String(Boolean(result.proxyUsed)),
+          },
+        });
+      }
+      return json({ requestId, result });
+    }
     if (path === '/v1/run' && request.method === 'POST') {
       const input = await requestJob(request);
       resolveJob(input, env);

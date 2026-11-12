@@ -34,3 +34,14 @@ export function publicHttpsUrl(value) {
       url.port || !publicHostname(url.hostname)) throw new JobError('invalid_server_config', 503);
   return url;
 }
+
+export function publicJobHttpsUrl(value) {
+  let url;
+  try { url = new URL(value); } catch { throw new JobError('invalid_job', 400); }
+  if (url.protocol !== 'https:' || url.username || url.password ||
+      url.port || !publicHostname(url.hostname)) {
+    throw new JobError('target_not_allowed', 403);
+  }
+  url.hash = '';
+  return url;
+}

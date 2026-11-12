@@ -1,8 +1,16 @@
-import { HTTP_METHODS, JOB_TIMEOUT_MS, JobError, MAX_SSH_TIMEOUT_MS, validateJob } from '../src/protocol.js';
-import { publicHostOrIp, publicHttpsUrl } from '../src/url-policy.js';
+import { HTTP_METHODS, JOB_TIMEOUT_MS, JobError, MAX_SSH_TIMEOUT_MS, OUTPUT_LIMIT, validateJob } from '../src/protocol.js';
+import { publicHostOrIp, publicHttpsUrl, publicJobHttpsUrl } from '../src/url-policy.js';
 
 const HEADER_NAME_PATTERN = /^[a-zA-Z0-9!#$%&'*+.^_`|~-]{1,64}$/;
 const SECRET_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const DEFAULT_DYNAMIC_HTTP_HEADERS = {
+  accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.9,*/*;q=0.8',
+  'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8',
+  'sec-fetch-dest': 'document',
+  'sec-fetch-mode': 'navigate',
+  'sec-fetch-site': 'none',
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+};
 
 function parseProxyEntry(raw, env) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new JobError('invalid_egress_proxy', 503);
@@ -45,6 +53,7 @@ export function gatewayConfig(env) {
     ...maps,
     secrets: env,
     allowDirectSsh: env.ALLOW_DIRECT_SSH === '1',
+    allowDynamicUrls: env.ALLOW_DYNAMIC_URLS === '1',
     executablePath: env.BROWSER_EXECUTABLE_PATH || undefined,
     proxy: defaultProxy,
     proxies,
@@ -81,8 +90,8 @@ function parseRedirectPolicy(target, defaultMax) {
   return { followRedirects: follow, maxRedirects };
 }
 
-function resolveHttpHeaders(target, job, secrets = {}) {
-  const headers = { accept: '*/*', 'user-agent': 'edge-mailbox/0.3' };
+function resolveHttpHeaders(target, job, secrets = {}, allowJobHeaders = false) {
+  const headers = { accept: '*/*', 'user-agent': 'edge-mailbox/0.4' };
   if (target.headers !== undefined) {
     if (!target.headers || typeof target.headers !== 'object' || Array.isArray(target.headers)) {
       throw new JobError('invalid_server_config', 503);
@@ -91,6 +100,12 @@ function resolveHttpHeaders(target, job, secrets = {}) {
       if (!HEADER_NAME_PATTERN.test(k) || typeof v !== 'string' || v.length > 1024 || /[\r\n\x00]/.test(v)) {
         throw new JobError('invalid_server_config', 503);
       }
+      headers[k.toLowerCase()] = v;
+    }
+  }
+  if (job.headers !== undefined) {
+    if (!allowJobHeaders) throw new JobError('headers_not_allowed', 403);
+    for (const [k, v] of Object.entries(job.headers)) {
       headers[k.toLowerCase()] = v;
     }
   }
@@ -128,6 +143,36 @@ export function resolveGatewayJob(input, config) {
   const job = validateJob(input);
   if (job.type === 'browse') return { job, ...resolveBrowserJob(job, config) };
   if (job.type === 'http') {
+    const body = job.body === undefined
+      ? undefined
+      : job.bodyEncoding === 'base64'
+        ? Uint8Array.from(Buffer.from(job.body, 'base64'))
+        : new TextEncoder().encode(job.body);
+    const maxBytes = job.maxBytes ?? OUTPUT_LIMIT;
+    const truncate = Boolean(job.truncate);
+    if (job.url !== undefined) {
+      if (!config.allowDynamicUrls) throw new JobError('dynamic_url_not_enabled', 403);
+      const url = publicJobHttpsUrl(job.url);
+      const method = job.method ?? 'GET';
+      const followRedirects = job.followRedirects ?? true;
+      const maxRedirects = followRedirects ? 5 : 0;
+      const headers = resolveHttpHeaders({ headers: DEFAULT_DYNAMIC_HTTP_HEADERS }, job, config.secrets, true);
+      const proxy = resolveProxy(config, job.proxy);
+      return {
+        job,
+        url: url.href,
+        method,
+        headers,
+        body,
+        followRedirects,
+        maxRedirects,
+        allowedOrigins: null,
+        maxBytes,
+        truncate,
+        proxy,
+        timeoutMs: JOB_TIMEOUT_MS,
+      };
+    }
     const target = targetConfig(config.HTTP_TARGETS, job.target);
     const base = publicHttpsUrl(target.url);
     if (base.hash) throw new JobError('invalid_server_config', 503);
@@ -140,17 +185,26 @@ export function resolveGatewayJob(input, config) {
     }
     const method = job.method ?? 'GET';
     if (!allowedMethods.includes(method)) throw new JobError('method_not_allowed', 405);
-    const { followRedirects, maxRedirects } = parseRedirectPolicy(target, 5);
+    const parsedRedirects = parseRedirectPolicy(target, 5);
+    let followRedirects = parsedRedirects.followRedirects;
+    let maxRedirects = parsedRedirects.maxRedirects;
+    if (job.followRedirects !== undefined) {
+      if (job.followRedirects === false) {
+        followRedirects = false;
+        maxRedirects = 0;
+      } else if (!followRedirects && !config.allowDynamicUrls) {
+        throw new JobError('redirect_not_allowed', 403);
+      } else {
+        followRedirects = true;
+        maxRedirects = maxRedirects || 5;
+      }
+    }
     const extraOrigins = target.allowedOrigins ?? [];
     if (!Array.isArray(extraOrigins) || extraOrigins.length > 10) throw new JobError('invalid_server_config', 503);
     const allowedOrigins = new Set([base.origin, ...extraOrigins.map(o => publicHttpsUrl(o).origin)]);
-    const headers = resolveHttpHeaders(target, job, config.secrets);
-    const body = job.body === undefined
-      ? undefined
-      : job.bodyEncoding === 'base64'
-        ? Uint8Array.from(Buffer.from(job.body, 'base64'))
-        : new TextEncoder().encode(job.body);
-    const proxy = resolveProxy(config, target.proxy);
+    const allowHeaders = Boolean(target.allowCustomHeaders || config.allowDynamicUrls);
+    const headers = resolveHttpHeaders(target, job, config.secrets, allowHeaders);
+    const proxy = resolveProxy(config, job.proxy ?? target.proxy);
     return {
       job,
       url: url.href,
@@ -160,6 +214,8 @@ export function resolveGatewayJob(input, config) {
       followRedirects,
       maxRedirects,
       allowedOrigins,
+      maxBytes,
+      truncate,
       proxy,
       timeoutMs: JOB_TIMEOUT_MS,
     };
@@ -218,6 +274,25 @@ export function resolveGatewayJob(input, config) {
 export function resolveBrowserJob(input, config) {
   const job = validateJob(input);
   if (job.type !== 'browse') throw new JobError('invalid_job');
+  if (job.url !== undefined) {
+    if (!config?.allowDynamicUrls) throw new JobError('dynamic_url_not_enabled', 403);
+    const url = publicJobHttpsUrl(job.url);
+    const followRedirects = job.followRedirects ?? true;
+    const proxy = resolveProxy(config, job.proxy);
+    return {
+      url: url.href,
+      origin: url.origin,
+      resourceOrigins: new Set([url.origin]),
+      allowAnyPublicOrigin: true,
+      scrollY: job.scrollY ?? 0,
+      selector: job.selector,
+      waitForSelector: job.waitForSelector,
+      settleMs: job.settleMs ?? 1500,
+      followRedirects,
+      maxRedirects: followRedirects ? 5 : 0,
+      proxy,
+    };
+  }
   const target = targetConfig(config.BROWSER_TARGETS, job.target);
   const base = publicHttpsUrl(target.url);
   const url = job.path === undefined ? base : publicHttpsUrl(new URL(job.path, base).href);
@@ -234,16 +309,19 @@ export function resolveBrowserJob(input, config) {
       (target.settleMs !== undefined && (!Number.isInteger(target.settleMs) || target.settleMs < 0 || target.settleMs > 3000))) {
     throw new JobError('invalid_server_config', 503);
   }
-  const { followRedirects, maxRedirects } = parseRedirectPolicy(target, 3);
-  const proxy = resolveProxy(config, target.proxy);
+  const parsedRedirects = parseRedirectPolicy(target, 3);
+  const followRedirects = job.followRedirects ?? parsedRedirects.followRedirects;
+  const maxRedirects = followRedirects ? (parsedRedirects.maxRedirects || 3) : 0;
+  const proxy = resolveProxy(config, job.proxy ?? target.proxy);
   return {
     url: url.href,
     origin: base.origin,
     resourceOrigins: new Set(origins),
+    allowAnyPublicOrigin: false,
     scrollY: job.scrollY ?? 0,
     selector: job.selector,
-    waitForSelector: target.waitForSelector,
-    settleMs: target.settleMs ?? 1000,
+    waitForSelector: job.waitForSelector ?? target.waitForSelector,
+    settleMs: job.settleMs ?? target.settleMs ?? 1000,
     followRedirects,
     maxRedirects,
     proxy,
@@ -254,6 +332,7 @@ export function requestAllowed(url, method, type, topNavigation, target) {
   if (!['GET', 'HEAD'].includes(method) || ['media', 'websocket', 'manifest'].includes(type)) return false;
   try {
     const parsed = publicHttpsUrl(url);
+    if (target.allowAnyPublicOrigin) return true;
     return topNavigation ? parsed.origin === target.origin : target.resourceOrigins.has(parsed.origin);
   } catch { return false; }
 }
@@ -290,5 +369,5 @@ export function listConfiguredTargets(config) {
     actions: Object.keys(t.actions || {}),
     proxy: (t.egress ?? 'proxy') === 'proxy' ? (t.proxy ?? 'default') : null,
   }));
-  return { http, browse, ssh };
+  return { dynamicUrls: Boolean(config.allowDynamicUrls), http, browse, ssh };
 }

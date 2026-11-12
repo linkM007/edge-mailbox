@@ -44,15 +44,23 @@ npm run cli -- --help
 配置 `EDGE_ENDPOINT` 与 `EDGE_RPC_TOKEN`（数据面）或 `CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_D1_DATABASE_ID`、`CLOUDFLARE_API_TOKEN`（D1 控制面）：
 
 ~~~sh
-# 1. 自发现服务端已配置的目标别名、允许的 HTTP 方法与 SSH 动作名（不含任何密钥）
+# 1. 自发现服务端已配置的目标别名、动态 URL 开关、允许的 HTTP 方法与 SSH 动作名（不含任何密钥）
 npm run cli -- targets
 
-# 2. 直接通过 --inline 或 --job 运行任务
-npm run cli -- run --inline '{"type":"http","target":"example","path":"/"}'
-npm run cli -- run --inline '{"type":"browse","target":"example","path":"/","selector":"main"}' --out capture-001
-npm run cli -- run --inline '{"type":"ssh","target":"ops","action":"uptime"}'
+# 2. 快捷 HTTP 请求（支持 GET / HEAD / OPTIONS / POST / PUT / PATCH / DELETE，开启 ALLOW_DYNAMIC_URLS=1 后可直接请求任意公网 HTTPS URL）
+npm run cli -- get https://ipinfo.io/json -b
+npm run cli -- head https://ai.meta.com/muse/
+npm run cli -- post https://httpbin.org/post -d '{"hello":"world"}' -H 'Accept: application/json'
+npm run cli -- put https://httpbin.org/put -d '{"k":"v"}'
+npm run cli -- patch https://httpbin.org/patch -d '{"k":"v2"}'
+npm run cli -- delete https://httpbin.org/delete
 
-# 3. 队列管理：入队、自适应轮询等待、列表查询、取消排队任务、手动触发消费
+# 3. 快捷无头浏览器渲染与 SSH 动作（或使用 --inline / --job 执行原始 JSON 任务）
+npm run cli -- browse https://dev.meta.ai/products/muse-code --out capture-001
+npm run cli -- ssh ops uptime
+npm run cli -- run --inline '{"type":"http","target":"example","path":"/"}'
+
+# 4. 队列管理：入队、自适应轮询等待、列表查询、取消排队任务、手动触发消费
 npm run cli -- enqueue --plane control --job examples/browser.json --id browse-job-001
 npm run cli -- wait --plane control --id browse-job-001 --timeout 300 --out capture-002
 npm run cli -- list --plane control --status pending --limit 20
@@ -74,15 +82,16 @@ CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... \
 | API | 作用 |
 | --- | --- |
 | `GET /healthz` | 无敏感信息存活与版本检查 |
-| `GET /v1/targets` | 查询服务端允许的目标别名、HTTP 方法与 SSH 动作清单 |
-| `POST /v1/run` | 同步执行任务，要求 Bearer `RPC_TOKEN` |
+| `GET /v1/targets` | 查询服务端允许的目标别名、`dynamicUrls` 状态、HTTP 方法与 SSH 动作清单 |
+| `GET /v1/http` | 认证后直接发起代理 `GET` / `HEAD` 请求（支持 `?url=...` 或 `?target=...&path=...`，`&raw=1` 直接返回原始响应体） |
+| `POST /v1/run` | 同步执行任务（支持全部 HTTP 方法、自定义请求头、`browse`、`ssh`），要求 Bearer `RPC_TOKEN` |
 | `POST /v1/jobs` | 异步入队（支持 `Idempotency-Key` 与 `x-edge-dispatch: immediate` 零等待后台执行） |
 | `GET /v1/jobs` | 按状态分页列出最近任务摘要（`?status=pending&limit=20`） |
 | `GET /v1/jobs/:id` | 查询单个任务详情与结果 |
 | `POST /v1/jobs/:id/cancel` | 取消尚处于 `pending` 状态的任务 |
 | `POST /v1/dispatch` | 立即触发一次 D1 信箱任务消费 |
 
-- JSON 请求上限 4 KiB；HTTP 输出 32 KiB；SSH 各输出流 32 KiB；普通任务默认 15 秒（SSH 可按目标/动作配置最高 60 秒）。
+- JSON 请求上限 4 KiB；HTTP 输出默认 32 KiB（同步执行最高可设 `maxBytes: 1048576` 即 1 MiB，支持 `truncate: true` 自动截断超大网页而不报错）；SSH 各输出流 32 KiB；普通任务默认 15 秒（SSH 可按目标/动作配置最高 60 秒）。
 - 浏览任务期限 40 秒；截图 JPEG 最大 240 KiB，正文最多 18000 字符，链接最多 30 个；每页最多 100 次资源请求、单资源 6 MiB、共享原子总预算 16 MiB（6 路并发复用代理会话）。非主文档子资源加载失败仅计入 `failedSubresources`，不会中断整页截图。
 - 每次消费最多处理 5 个任务；队列上限 100 个 `pending`/`running`；1 小时未领取过期，终态记录满 24 小时自动清理。SSH 中断保守记为 `unknown`，避免自动重放产生副作用。
 

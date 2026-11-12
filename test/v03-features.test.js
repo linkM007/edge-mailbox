@@ -298,9 +298,10 @@ test('Worker and CLI support targets manifest, list, cancel, dispatch, and immed
     });
 
     const health = await client.health();
-    assert.equal(health.version, '0.3.0');
+    assert.equal(health.version, '0.4.0');
     const targetsResp = await client.targets();
     assert.equal(targetsResp.targets.http[0].name, 'ip');
+    assert.equal(targetsResp.targets.dynamicUrls, false);
 
     // Enqueue without immediate -> stays pending so we can list & cancel it
     const pendingJob = await client.enqueue({ type: 'http', target: 'ip' }, 'cancel-me-001');
@@ -323,4 +324,105 @@ test('Worker and CLI support targets manifest, list, cancel, dispatch, and immed
   } finally {
     await mf.dispose();
   }
+});
+
+test('ALLOW_DYNAMIC_URLS supports full HTTP methods, GET /v1/http raw/JSON modes, truncation, and dynamic browse while blocking SSRF', async () => {
+  // Fails closed by default when ALLOW_DYNAMIC_URLS is unset
+  assert.throws(() => resolveJob({ type: 'http', target: '_url', url: 'https://example.com/api' }, baseEnv), /dynamic_url_not_enabled/);
+  assert.throws(() => resolveJob({ type: 'browse', target: '_url', url: 'https://example.com/' }, baseEnv), /dynamic_url_not_enabled/);
+
+  const dynEnv = { ...baseEnv, ALLOW_DYNAMIC_URLS: '1' };
+
+  // SSRF protection still rejects insecure schemes, private/metadata IPs, localhost, credentials, and custom ports
+  for (const badUrl of [
+    'http://example.com/',
+    'https://localhost/admin',
+    'https://127.0.0.1/',
+    'https://169.254.169.254/latest/meta-data/',
+    'https://user:pass@example.com/',
+    'https://example.com:8443/',
+  ]) {
+    assert.throws(() => resolveJob({ type: 'http', target: '_url', url: badUrl }, dynEnv), /target_not_allowed/, badUrl);
+    assert.throws(() => resolveJob({ type: 'browse', target: '_url', url: badUrl }, dynEnv), /target_not_allowed/, badUrl);
+  }
+
+  // Forbidden framing headers are rejected at validation time
+  assert.throws(() => validateJob({
+    type: 'http', target: '_url', url: 'https://example.com/', headers: { Host: 'evil.com' },
+  }), /invalid_job/);
+
+  // All HTTP methods (GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE) work with custom headers & response headers
+  for (const method of ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+    const hasBody = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+    const res = await executeJob(
+      {
+        type: 'http',
+        target: '_url',
+        url: 'https://api.example.com/v2/resource#frag',
+        method,
+        headers: { 'X-Custom-Trace': 'trace-123' },
+        ...(hasBody ? { body: '{"ok":true}', contentType: 'application/json' } : {}),
+        maxBytes: 10,
+        truncate: true,
+      },
+      dynEnv,
+      {
+        request: async (url, _proxy, options) => {
+          assert.equal(url, 'https://api.example.com/v2/resource');
+          assert.equal(options.method, method);
+          assert.equal(options.headers['x-custom-trace'], 'trace-123');
+          assert.equal(options.limit, 10);
+          assert.equal(options.truncate, true);
+          return {
+            status: 200,
+            finalUrl: 'https://www.example.com/v2/resource',
+            redirectCount: 1,
+            headers: new Headers({ 'content-type': 'text/plain', 'x-upstream': 'yes', 'set-cookie': 'sid=secret' }),
+            bytes: Buffer.from('0123456789'),
+            truncated: true,
+          };
+        },
+      },
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.bodyTruncated, true);
+    assert.equal(res.headers['x-upstream'], 'yes');
+    assert.equal(res.headers['set-cookie'], undefined);
+  }
+
+  // GET /v1/http supports both JSON envelope and raw=1 direct body response
+  const mockExec = async input => ({
+    type: 'http',
+    status: 200,
+    url: input.url,
+    redirectCount: 0,
+    contentType: 'application/json',
+    headers: { 'content-type': 'application/json' },
+    encoding: 'base64',
+    body: Buffer.from('{"ip":"1.2.3.4"}').toString('base64'),
+    bodyTruncated: false,
+    proxyUsed: true,
+  });
+
+  const jsonResp = await handleRequest(
+    new Request('https://worker.example.com/v1/http?url=' + encodeURIComponent('https://ipinfo.io/json'), {
+      headers: { authorization: `Bearer ${dynEnv.RPC_TOKEN}` },
+    }),
+    dynEnv,
+    mockExec,
+  );
+  assert.equal(jsonResp.status, 200);
+  const jsonPayload = await jsonResp.json();
+  assert.equal(jsonPayload.result.url, 'https://ipinfo.io/json');
+
+  const rawResp = await handleRequest(
+    new Request('https://worker.example.com/v1/http?url=' + encodeURIComponent('https://ipinfo.io/json') + '&raw=1', {
+      headers: { authorization: `Bearer ${dynEnv.RPC_TOKEN}` },
+    }),
+    dynEnv,
+    mockExec,
+  );
+  assert.equal(rawResp.status, 200);
+  assert.equal(rawResp.headers.get('x-edge-proxy-used'), 'true');
+  assert.equal(await rawResp.text(), '{"ip":"1.2.3.4"}');
 });

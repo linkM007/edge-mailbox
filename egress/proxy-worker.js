@@ -1,6 +1,6 @@
 import { connect } from 'cloudflare:sockets';
 import { Client } from 'tunnelfetch';
-import { JobError, readLimited } from '../src/protocol.js';
+import { JobError, readLimitedWithMeta } from '../src/protocol.js';
 import { publicHttpsUrl } from '../src/url-policy.js';
 export { proxyTunnel, directTunnel } from './proxy-tunnel.js';
 
@@ -24,7 +24,7 @@ export function createProxySession(proxy) {
   });
 
   return {
-    async fetch(url, { signal, limit = 32768, budget = null, method = 'GET', body, headers, maxRedirects = 0, allowedOrigins = null } = {}) {
+    async fetch(url, { signal, limit = 32768, budget = null, truncate = false, method = 'GET', body, headers, maxRedirects = 0, allowedOrigins = null } = {}) {
       let currentUrl = url;
       let currentMethod = method;
       let currentBody = body;
@@ -49,7 +49,8 @@ export function createProxySession(proxy) {
             let nextUrl;
             try { nextUrl = publicHttpsUrl(new URL(location, currentUrl).href); }
             catch { throw new JobError('redirect_blocked', 502); }
-            if (nextUrl.hash || (allowedOrigins && !allowedOrigins.has(nextUrl.origin))) {
+            nextUrl.hash = '';
+            if (allowedOrigins && !allowedOrigins.has(nextUrl.origin)) {
               throw new JobError('redirect_blocked', 502);
             }
             if (response.status === 303 || ((response.status === 301 || response.status === 302) && !['GET', 'HEAD'].includes(currentMethod))) {
@@ -64,13 +65,14 @@ export function createProxySession(proxy) {
             redirects++;
             continue;
           }
-          const bytes = currentMethod === 'HEAD'
-            ? (void response.body?.cancel().catch(() => {}), new Uint8Array())
-            : await readLimited(response.body, limit, budget);
+          const { bytes, truncated } = currentMethod === 'HEAD'
+            ? (void response.body?.cancel().catch(() => {}), { bytes: new Uint8Array(), truncated: false })
+            : await readLimitedWithMeta(response.body, limit, budget, { truncate });
           return {
             status: response.status,
             headers: response.headers,
             bytes,
+            truncated,
             finalUrl: currentUrl,
             redirectCount: redirects,
           };

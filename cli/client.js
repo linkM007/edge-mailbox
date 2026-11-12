@@ -67,7 +67,7 @@ export function createClient({ plane = 'data', env = process.env, dispatcher, re
       void response.body?.cancel().catch(() => {});
       throw new Error(`remote_http_${response.status}`);
     }
-    try { return JSON.parse(new TextDecoder().decode(await readLimited(response.body, 1048576))); }
+    try { return JSON.parse(new TextDecoder().decode(await readLimited(response.body, 4194304))); }
     catch { throw new Error('invalid_remote_response'); }
   }
 
@@ -89,6 +89,18 @@ export function createClient({ plane = 'data', env = process.env, dispatcher, re
     async targets() {
       if (plane !== 'data') throw new Error('control_plane_has_no_targets_endpoint');
       return send(`${base}/v1/targets`);
+    },
+    async httpGet({ url, target, path, followRedirects, maxBytes, truncate, proxy } = {}) {
+      if (plane !== 'data') throw new Error('control_plane_is_asynchronous');
+      const params = new URLSearchParams();
+      if (url !== undefined) params.set('url', url);
+      if (target !== undefined) params.set('target', target);
+      if (path !== undefined) params.set('path', path);
+      if (followRedirects !== undefined) params.set('follow', followRedirects ? '1' : '0');
+      if (maxBytes !== undefined) params.set('maxBytes', String(maxBytes));
+      if (truncate !== undefined) params.set('truncate', truncate ? '1' : '0');
+      if (proxy !== undefined) params.set('proxy', proxy);
+      return send(`${base}/v1/http?${params.toString()}`);
     },
     async dispatch() {
       if (plane !== 'data') throw new Error('control_plane_is_asynchronous');

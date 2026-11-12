@@ -22,21 +22,33 @@ export async function executeGatewayJob(
     if (resolved.job.type === 'http') {
       const response = await request(resolved.url, resolved.proxy, {
         signal: controller.signal,
-        limit: OUTPUT_LIMIT,
+        limit: resolved.maxBytes ?? OUTPUT_LIMIT,
+        truncate: Boolean(resolved.truncate),
         method: resolved.method,
         body: resolved.body,
         headers: resolved.headers,
         maxRedirects: resolved.maxRedirects,
         allowedOrigins: resolved.allowedOrigins,
       });
+      const respHeaders = {};
+      if (response.headers) {
+        for (const [k, v] of response.headers) {
+          const lower = k.toLowerCase();
+          if (lower !== 'set-cookie' && Object.keys(respHeaders).length < 40) {
+            respHeaders[lower] = String(v).slice(0, 1024);
+          }
+        }
+      }
       return {
         type: 'http',
         status: response.status,
         url: response.finalUrl ?? resolved.url,
         redirectCount: response.redirectCount ?? 0,
-        contentType: response.headers.get('content-type')?.slice(0, 256) ?? null,
+        contentType: response.headers?.get('content-type')?.slice(0, 256) ?? null,
+        headers: respHeaders,
         encoding: 'base64',
         body: Buffer.from(response.bytes).toString('base64'),
+        bodyTruncated: Boolean(response.truncated),
         proxyUsed: true,
       };
     }
