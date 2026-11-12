@@ -4,8 +4,8 @@ import { resolveBrowserJob, requestAllowed } from './config.js';
 import { createProxySession } from './proxy.js';
 
 const MAX_CONCURRENT_REQUESTS = 6;
-const MAX_TOTAL_BYTES = 8388608;
-const MAX_RESOURCE_BYTES = 2097152;
+const MAX_TOTAL_BYTES = 16777216;
+const MAX_RESOURCE_BYTES = 6291456;
 const DEFAULT_BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
 
 export async function browse(input, config, { launch, timeoutMs = 40000, signal, requestResource } = {}) {
@@ -68,7 +68,7 @@ export async function browse(input, config, { launch, timeoutMs = 40000, signal,
       ignoreHTTPSErrors: false,
     });
     await context.addInitScript(() => {
-      for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'WebTransport', 'Worker', 'SharedWorker']) {
+      for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'WebTransport', 'SharedWorker']) {
         Object.defineProperty(window, name, { value: undefined, configurable: false, writable: false });
       }
     });
@@ -94,10 +94,37 @@ export async function browse(input, config, { launch, timeoutMs = 40000, signal,
             }
             const remaining = Math.max(1, byteBudget.max - byteBudget.used);
             const reqHeaders = request.headers() ?? {};
+            const resType = request.resourceType();
+            const reqOrigin = new URL(request.url()).origin;
+            let validatedOrigin;
+            if (reqHeaders.origin && reqHeaders.origin.length <= 256) {
+              try {
+                const origUrl = new URL(reqHeaders.origin);
+                if (origUrl.protocol === 'https:' && target.resourceOrigins.has(origUrl.origin)) {
+                  validatedOrigin = origUrl.origin;
+                }
+              } catch {}
+            }
+            const destMap = { script: 'script', stylesheet: 'style', image: 'image', font: 'font', document: 'iframe' };
+            const secFetchDest = reqHeaders['sec-fetch-dest'] ?? (topNavigation ? 'document' : (destMap[resType] ?? 'empty'));
+            const secFetchMode = reqHeaders['sec-fetch-mode'] ?? (topNavigation
+              ? 'navigate'
+              : (validatedOrigin || resType === 'xhr' || resType === 'fetch' || resType === 'font' ? 'cors' : 'no-cors'));
+            const secFetchSite = reqHeaders['sec-fetch-site'] ?? (topNavigation
+              ? 'none'
+              : (reqOrigin === target.origin ? 'same-origin' : 'cross-site'));
             const outboundHeaders = {
-              accept: reqHeaders.accept ?? '*/*',
-              'user-agent': (reqHeaders['user-agent'] ?? DEFAULT_BROWSER_UA).replace('HeadlessChrome/', 'Chrome/'),
-              'accept-language': reqHeaders['accept-language'] ?? 'zh-CN,zh;q=0.9,en;q=0.8',
+              accept: reqHeaders.accept ?? (topNavigation ? 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' : '*/*'),
+              'user-agent': (reqHeaders['user-agent'] ?? DEFAULT_BROWSER_UA).replaceAll('HeadlessChrome', 'Chrome'),
+              'accept-language': reqHeaders['accept-language'] ?? 'en-US,en;q=0.9,zh-CN;q=0.8',
+              'sec-ch-ua': (reqHeaders['sec-ch-ua'] ?? '"Chromium";v="134", "Not:A-Brand";v="24", "Google Chrome";v="134"').replaceAll('HeadlessChrome', 'Google Chrome'),
+              'sec-ch-ua-mobile': reqHeaders['sec-ch-ua-mobile'] ?? '?0',
+              'sec-ch-ua-platform': reqHeaders['sec-ch-ua-platform'] ?? '"Windows"',
+              'sec-fetch-dest': secFetchDest,
+              'sec-fetch-mode': secFetchMode,
+              'sec-fetch-site': secFetchSite,
+              ...(topNavigation ? { 'sec-fetch-user': reqHeaders['sec-fetch-user'] ?? '?1', 'upgrade-insecure-requests': '1' } : {}),
+              ...(validatedOrigin ? { origin: validatedOrigin } : {}),
             };
             if (reqHeaders.referer && reqHeaders.referer.length <= 512) {
               try {
@@ -144,6 +171,7 @@ export async function browse(input, config, { launch, timeoutMs = 40000, signal,
     const response = await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
     if (budgetExceeded) throw new JobError('size_limit_exceeded', 413);
     if (topBlocked) throw new JobError('navigation_blocked', 403);
+    await page.waitForLoadState?.('load', { timeout: 15000 }).catch(() => {});
     if (target.waitForSelector) await page.waitForSelector(target.waitForSelector, { state: 'visible' });
     if (target.settleMs) await new Promise(resolve => setTimeout(resolve, target.settleMs));
     await page.evaluate(y => window.scrollTo(0, y), target.scrollY);
@@ -174,7 +202,7 @@ export async function browse(input, config, { launch, timeoutMs = 40000, signal,
     if (target.selector !== undefined) {
       selectedText = await page.evaluate(sel => {
         const el = document.querySelector(sel);
-        return el ? (el.innerText ?? el.textContent ?? '').slice(0, 18000) : null;
+        return el ? (el.innerText || el.textContent || '').slice(0, 18000) : null;
       }, target.selector);
     }
     let screenshot;

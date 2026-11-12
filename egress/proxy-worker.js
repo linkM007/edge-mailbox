@@ -17,8 +17,8 @@ export function createProxySession(proxy) {
     forceTunnel: true,
     trust: { mode: 'system' },
     http2: false,
-    maxBodyBytes: 8388608,
-    limits: { maxHeaderBytes: 16384, maxProxyReplyBytes: 8192 },
+    maxBodyBytes: 16777216,
+    limits: { maxHeaderBytes: 32768, maxProxyReplyBytes: 8192 },
     timeouts: { connectMs: 5000, handshakeMs: 10000, totalMs: 20000 },
     nativeFetch: () => { throw new JobError('direct_egress_disabled', 503); },
   });

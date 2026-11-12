@@ -83,7 +83,7 @@ CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... \
 | `POST /v1/dispatch` | 立即触发一次 D1 信箱任务消费 |
 
 - JSON 请求上限 4 KiB；HTTP 输出 32 KiB；SSH 各输出流 32 KiB；普通任务默认 15 秒（SSH 可按目标/动作配置最高 60 秒）。
-- 浏览任务期限 40 秒；截图 JPEG 最大 240 KiB，正文最多 18000 字符，链接最多 30 个；每页最多 100 次资源请求、单资源 2 MiB、共享原子总预算 8 MiB（6 路并发复用代理会话）。非主文档子资源加载失败仅计入 `failedSubresources`，不会中断整页截图。
+- 浏览任务期限 40 秒；截图 JPEG 最大 240 KiB，正文最多 18000 字符，链接最多 30 个；每页最多 100 次资源请求、单资源 6 MiB、共享原子总预算 16 MiB（6 路并发复用代理会话）。非主文档子资源加载失败仅计入 `failedSubresources`，不会中断整页截图。
 - 每次消费最多处理 5 个任务；队列上限 100 个 `pending`/`running`；1 小时未领取过期，终态记录满 24 小时自动清理。SSH 中断保守记为 `unknown`，避免自动重放产生副作用。
 
 MIT。贡献前阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。

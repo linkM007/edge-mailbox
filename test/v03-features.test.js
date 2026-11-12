@@ -229,9 +229,11 @@ test('browser isolates non-navigation subresource failures while enforcing share
   };
   const browser = { async newContext() { return context; }, async close() {} };
 
+  const seenHeaders = new Map();
   const res = await browse({ type: 'browse', target: 'site', selector: '#hero' }, cfg, {
     launch: async () => browser,
-    requestResource: async url => {
+    requestResource: async (url, _proxy, options) => {
+      seenHeaders.set(url, options.headers);
       if (url.endsWith('broken.png')) throw new Error('upstream_404');
       return { status: 200, redirectCount: 1, headers: new Headers(), bytes: Buffer.from('<h1>OK</h1>') };
     },
@@ -239,6 +241,12 @@ test('browser isolates non-navigation subresource failures while enforcing share
   assert.equal(res.failedSubresources, 1);
   assert.equal(res.redirectCount, 1);
   assert.equal(res.selectedText, 'Hero Headline');
+  assert.equal(seenHeaders.get('https://example.com/')?.['sec-fetch-mode'], 'navigate');
+  assert.equal(seenHeaders.get('https://example.com/')?.['sec-fetch-dest'], 'document');
+  assert.equal(seenHeaders.get('https://example.com/')?.['sec-fetch-site'], 'none');
+  assert.equal(seenHeaders.get('https://cdn.example.com/broken.png')?.['sec-fetch-dest'], 'image');
+  assert.equal(seenHeaders.get('https://cdn.example.com/broken.png')?.['sec-fetch-mode'], 'no-cors');
+  assert.equal(seenHeaders.get('https://cdn.example.com/broken.png')?.['sec-fetch-site'], 'cross-site');
 
   // Shared byte budget rejects concurrent overruns immediately
   const budget = { used: 0, max: 15 };
