@@ -10,8 +10,9 @@ const { Server, utils } = ssh2;
 
 import { publicHostOrIp, publicIpv4 } from '../src/url-policy.js';
 import { readLimited, validateJob } from '../src/protocol.js';
-import { executeJob, listTargets, resolveJob } from '../src/executor.js';
+import { executeJob, executeProxyFetch, listTargets, resolveJob } from '../src/executor.js';
 import { browse } from '../egress/browser.js';
+import { runBrowserSession } from '../egress/session-browser.js';
 import { handleRequest } from '../src/worker.js';
 import { createClient } from '../cli/client.js';
 
@@ -426,3 +427,156 @@ test('ALLOW_DYNAMIC_URLS supports full HTTP methods, GET /v1/http raw/JSON modes
   assert.equal(rawResp.headers.get('x-edge-proxy-used'), 'true');
   assert.equal(await rawResp.text(), '{"ip":"1.2.3.4"}');
 });
+
+test('executeProxyFetch and runBrowserSession enforce SSRF rules, sanitize headers, sync cookies, and shim navigation redirects', async () => {
+  await assert.rejects(
+    executeProxyFetch(new Request('https://worker.example.com/v1/proxy-fetch', {
+      method: 'POST',
+      headers: { 'x-target-url': 'https://example.com/' },
+    }), baseEnv),
+    /dynamic_url_not_enabled/,
+  );
+
+  const dynEnv = { ...baseEnv, ALLOW_DYNAMIC_URLS: '1' };
+
+  await assert.rejects(
+    executeProxyFetch(new Request('https://worker.example.com/v1/proxy-fetch', {
+      method: 'POST',
+      headers: { 'x-target-url': 'https://127.0.0.1/secret' },
+    }), dynEnv),
+    /target_not_allowed/,
+  );
+
+  const headersB64 = Buffer.from(JSON.stringify({
+    Host: 'spoof.example.com',
+    'Proxy-Authorization': 'Basic evil',
+    'Accept-Encoding': 'br, zstd',
+    'X-Trace': 'ok-1',
+  })).toString('base64');
+
+  const relayed = await executeProxyFetch(
+    new Request('https://worker.example.com/v1/proxy-fetch', {
+      method: 'POST',
+      headers: {
+        'x-target-url': 'https://auth.example.com/login',
+        'x-target-method': 'POST',
+        'x-target-follow': '1',
+        'x-target-headers-b64': headersB64,
+      },
+      body: Buffer.from('a=1'),
+    }),
+    dynEnv,
+    {
+      request: async (url, _proxy, options) => {
+        assert.equal(url, 'https://auth.example.com/login');
+        assert.equal(options.method, 'POST');
+        assert.equal(options.maxRedirects, 5);
+        assert.equal(options.returnOnRedirect, false);
+        assert.equal(options.headers.host, undefined);
+        assert.equal(options.headers['proxy-authorization'], undefined);
+        assert.equal(options.headers['accept-encoding'], 'gzip, deflate');
+        assert.equal(options.headers['x-trace'], 'ok-1');
+        assert.equal(Buffer.from(options.body).toString('utf8'), 'a=1');
+        const h = new Headers({ 'content-type': 'application/json', 'content-encoding': 'gzip' });
+        h.append('set-cookie', 'sid=abc; Path=/; Secure; HttpOnly');
+        return { status: 200, headers: h, bytes: new Uint8Array([123, 125]) };
+      },
+    },
+  );
+  assert.equal(relayed.status, 200);
+  assert.equal(relayed.headers['content-type'], 'application/json');
+  assert.equal(relayed.headers['content-encoding'], undefined);
+  assert.deepEqual(relayed.setCookies, ['sid=abc; Path=/; Secure; HttpOnly']);
+  assert.equal(Buffer.from(relayed.bytes).toString('utf8'), '{}');
+
+  // Interactive browser session shims 302 navigation redirects and syncs cookies
+  let routeHandler;
+  const addedCookies = [];
+  const fulfilledPayloads = [];
+  const mainFrame = { url: () => 'https://example.com/' };
+  const mockPage = {
+    on() {},
+    mainFrame: () => mainFrame,
+    url: () => 'https://auth.example.com/welcome',
+    title: async () => 'Welcome',
+    setViewportSize: async () => {},
+    waitForLoadState: async () => {},
+    goto: async url => {
+      await routeHandler({
+        request: () => ({
+          url: () => url,
+          method: () => 'GET',
+          resourceType: () => 'document',
+          isNavigationRequest: () => true,
+          frame: () => mainFrame,
+          headers: () => ({ accept: 'text/html' }),
+          allHeaders: async () => ({ accept: 'text/html' }),
+          postDataBuffer: () => null,
+        }),
+        fulfill: async opts => { fulfilledPayloads.push(opts); },
+        abort: async () => { throw new Error('unexpected_abort'); },
+      });
+      await routeHandler({
+        request: () => ({
+          url: () => 'http://169.254.169.254/latest',
+          method: () => 'GET',
+          resourceType: () => 'xhr',
+          isNavigationRequest: () => false,
+          frame: () => mainFrame,
+          headers: () => ({}),
+          allHeaders: async () => ({}),
+          postDataBuffer: () => null,
+        }),
+        fulfill: async () => { throw new Error('ssrf_not_blocked'); },
+        abort: async () => {},
+      });
+      return { status: () => 200 };
+    },
+    evaluate: async fn => {
+      if (String(fn).includes('edgeRedirect')) return false;
+      return { text: 'Hello session', elements: [{ tag: 'button', text: 'Continue', selector: 'button' }] };
+    },
+    screenshot: async () => Buffer.from('/9j/2Q==', 'base64'),
+  };
+  const mockContext = {
+    pages: () => [mockPage],
+    addInitScript: async () => {},
+    cookies: async () => addedCookies,
+    addCookies: async list => { addedCookies.push(...list); },
+    route: async (_pat, cb) => { routeHandler = cb; },
+    unrouteAll: async () => {},
+  };
+  const mockBrowser = {
+    contexts: () => [mockContext],
+    close: async () => {},
+  };
+
+  const sessionRes = await runBrowserSession(
+    {
+      steps: [{ action: 'goto', url: 'https://example.com/' }],
+      settleMs: 0,
+    },
+    { allowDynamicUrls: true },
+    {
+      acquireSession: async () => ({ sessionId: 'sess-test-1' }),
+      connectSession: async () => mockBrowser,
+      makeProxySession: () => ({
+        fetch: async () => {
+          const h = new Headers({ location: 'https://auth.example.com/welcome' });
+          h.append('set-cookie', 'csrftoken=xyz; Domain=example.com; Path=/; Secure');
+          return { status: 302, headers: h, bytes: new Uint8Array() };
+        },
+        close: async () => {},
+      }),
+    },
+  );
+
+  assert.equal(sessionRes.sessionId, 'sess-test-1');
+  assert.equal(sessionRes.proxyUsed, true);
+  assert.equal(addedCookies.length, 1);
+  assert.equal(addedCookies[0].name, 'csrftoken');
+  assert.equal(fulfilledPayloads.length, 1);
+  assert.ok(fulfilledPayloads[0].body.toString('utf8').includes('data-edge-redirect="1"'));
+  assert.ok(sessionRes.networkLog.some(entry => entry.error === 'target_not_allowed'));
+});
+

@@ -155,7 +155,7 @@ export function resolveGatewayJob(input, config) {
       const url = publicJobHttpsUrl(job.url);
       const method = job.method ?? 'GET';
       const followRedirects = job.followRedirects ?? true;
-      const maxRedirects = followRedirects ? 5 : 0;
+      const maxRedirects = followRedirects ? 10 : 0;
       const headers = resolveHttpHeaders({ headers: DEFAULT_DYNAMIC_HTTP_HEADERS }, job, config.secrets, true);
       const proxy = resolveProxy(config, job.proxy);
       return {
@@ -166,6 +166,7 @@ export function resolveGatewayJob(input, config) {
         body,
         followRedirects,
         maxRedirects,
+        returnOnRedirect: !followRedirects,
         allowedOrigins: null,
         maxBytes,
         truncate,

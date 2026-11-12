@@ -1,6 +1,6 @@
 import { ProxyAgent, fetch } from 'undici';
 import { JobError, readLimitedWithMeta } from '../src/protocol.js';
-import { publicHttpsUrl } from '../src/url-policy.js';
+import { publicJobHttpsUrl } from '../src/url-policy.js';
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
@@ -16,7 +16,7 @@ export function proxyDispatcher(proxy) {
 export function createProxySession(proxy) {
   const dispatcher = proxyDispatcher(proxy);
   return {
-    async fetch(url, { signal, limit = 32768, budget = null, truncate = false, method = 'GET', body, headers, maxRedirects = 0, allowedOrigins = null } = {}) {
+    async fetch(url, { signal, limit = 32768, budget = null, truncate = false, method = 'GET', body, headers, maxRedirects = 0, returnOnRedirect = false, allowedOrigins = null } = {}) {
       let currentUrl = url;
       let currentMethod = method;
       let currentBody = body;
@@ -32,16 +32,37 @@ export function createProxySession(proxy) {
             redirect: 'manual',
             headers: currentHeaders,
           });
+          if (response.status === 304) {
+            void response.body?.cancel().catch(() => {});
+            return {
+              status: 304,
+              headers: response.headers,
+              bytes: new Uint8Array(),
+              truncated: false,
+              finalUrl: currentUrl,
+              redirectCount: redirects,
+            };
+          }
           if (response.status >= 300 && response.status < 400) {
+            if (returnOnRedirect) {
+              void response.body?.cancel().catch(() => {});
+              return {
+                status: response.status,
+                headers: response.headers,
+                bytes: new Uint8Array(),
+                truncated: false,
+                finalUrl: currentUrl,
+                redirectCount: redirects,
+              };
+            }
             const location = response.headers.get('location');
             void response.body?.cancel().catch(() => {});
             if (!REDIRECT_STATUSES.has(response.status) || redirects >= maxRedirects || !location) {
               throw new JobError('redirect_blocked', 502);
             }
             let nextUrl;
-            try { nextUrl = publicHttpsUrl(new URL(location, currentUrl).href); }
+            try { nextUrl = publicJobHttpsUrl(new URL(location, currentUrl).href); }
             catch { throw new JobError('redirect_blocked', 502); }
-            nextUrl.hash = '';
             if (allowedOrigins && !allowedOrigins.has(nextUrl.origin)) {
               throw new JobError('redirect_blocked', 502);
             }

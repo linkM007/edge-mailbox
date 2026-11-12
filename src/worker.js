@@ -1,4 +1,4 @@
-import { executeJob, listTargets, resolveJob } from './executor.js';
+import { executeBrowserSession, executeJob, executeProxyFetch, listTargets, resolveJob } from './executor.js';
 import { cancelJob, enqueue, listJobs, processMailbox, SELECT_JOB } from './mailbox.js';
 import { INPUT_LIMIT, JobError, VERSION, publicError, publicJob, readLimited, validateId } from './protocol.js';
 
@@ -81,6 +81,34 @@ export async function handleRequest(request, env, execute = executeJob, ctx = nu
         });
       }
       return json({ requestId, result });
+    }
+    if (path === '/v1/proxy-fetch' && request.method === 'POST') {
+      const relayed = await executeProxyFetch(request, env);
+      const metaB64 = Buffer.from(JSON.stringify({
+        status: relayed.status,
+        headers: relayed.headers,
+        setCookies: relayed.setCookies,
+      }), 'utf8').toString('base64');
+      return new Response(relayed.bytes, {
+        status: 200,
+        headers: {
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+          'content-type': 'application/octet-stream',
+          'x-edge-request-id': requestId,
+          'x-upstream-meta': metaB64,
+        },
+      });
+    }
+    if (path === '/v1/browser' && request.method === 'POST') {
+      if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+        throw new JobError('json_required', 415);
+      }
+      const bytes = await readLimited(request.body, 16384);
+      let input;
+      try { input = JSON.parse(new TextDecoder().decode(bytes)); }
+      catch { throw new JobError('invalid_json'); }
+      return json({ requestId, result: await executeBrowserSession(input, env) });
     }
     if (path === '/v1/run' && request.method === 'POST') {
       const input = await requestJob(request);

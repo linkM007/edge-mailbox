@@ -28,6 +28,7 @@ export async function executeGatewayJob(
         body: resolved.body,
         headers: resolved.headers,
         maxRedirects: resolved.maxRedirects,
+        returnOnRedirect: Boolean(resolved.returnOnRedirect),
         allowedOrigins: resolved.allowedOrigins,
       });
       const respHeaders = {};

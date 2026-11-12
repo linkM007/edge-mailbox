@@ -1,7 +1,8 @@
 import { connect } from 'cloudflare:sockets';
 import { Client } from 'tunnelfetch';
+import { chrome } from 'tunnelfetch/profile/chrome';
 import { JobError, readLimitedWithMeta } from '../src/protocol.js';
-import { publicHttpsUrl } from '../src/url-policy.js';
+import { publicJobHttpsUrl } from '../src/url-policy.js';
 export { proxyTunnel, directTunnel } from './proxy-tunnel.js';
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -12,24 +13,25 @@ export function createProxySession(proxy) {
   endpoint.username = proxy.username;
   endpoint.password = proxy.password;
   const client = new Client({
+    profile: chrome,
     connect,
     proxy: endpoint.href,
     forceTunnel: true,
     trust: { mode: 'system' },
-    http2: false,
     maxBodyBytes: 16777216,
     limits: { maxHeaderBytes: 32768, maxProxyReplyBytes: 8192 },
-    timeouts: { connectMs: 5000, handshakeMs: 10000, totalMs: 20000 },
+    timeouts: { connectMs: 5000, handshakeMs: 10000, totalMs: 25000 },
     nativeFetch: () => { throw new JobError('direct_egress_disabled', 503); },
   });
 
   return {
-    async fetch(url, { signal, limit = 32768, budget = null, truncate = false, method = 'GET', body, headers, maxRedirects = 0, allowedOrigins = null } = {}) {
+    async fetch(url, { signal, limit = 32768, budget = null, truncate = false, method = 'GET', body, headers, maxRedirects = 0, returnOnRedirect = false, allowedOrigins = null } = {}) {
       let currentUrl = url;
       let currentMethod = method;
       let currentBody = body;
       let currentHeaders = headers ? { ...headers } : undefined;
       let redirects = 0;
+      const redirectCookies = [];
       try {
         while (true) {
           const response = await client.fetch(currentUrl, {
@@ -40,16 +42,46 @@ export function createProxySession(proxy) {
             headers: currentHeaders,
           });
           if (response.tunnelfetch?.proxied !== true) throw new JobError('direct_egress_disabled', 503);
+          if (response.status === 304) {
+            void response.body?.cancel().catch(() => {});
+            let outHeaders = response.headers;
+            if (redirectCookies.length) {
+              outHeaders = new Headers(response.headers);
+              for (const c of redirectCookies) outHeaders.append('set-cookie', c);
+            }
+            return {
+              status: 304,
+              headers: outHeaders,
+              bytes: new Uint8Array(),
+              truncated: false,
+              finalUrl: currentUrl,
+              redirectCount: redirects,
+            };
+          }
           if (response.status >= 300 && response.status < 400) {
+            if (returnOnRedirect) {
+              void response.body?.cancel().catch(() => {});
+              return {
+                status: response.status,
+                headers: response.headers,
+                bytes: new Uint8Array(),
+                truncated: false,
+                finalUrl: currentUrl,
+                redirectCount: redirects,
+              };
+            }
+            const hopCookies = typeof response.headers.getSetCookie === 'function'
+              ? response.headers.getSetCookie()
+              : (response.headers.get('set-cookie') ? [response.headers.get('set-cookie')] : []);
+            for (const c of hopCookies) redirectCookies.push(c);
             const location = response.headers.get('location');
             void response.body?.cancel().catch(() => {});
             if (!REDIRECT_STATUSES.has(response.status) || redirects >= maxRedirects || !location) {
               throw new JobError('redirect_blocked', 502);
             }
             let nextUrl;
-            try { nextUrl = publicHttpsUrl(new URL(location, currentUrl).href); }
+            try { nextUrl = publicJobHttpsUrl(new URL(location, currentUrl).href); }
             catch { throw new JobError('redirect_blocked', 502); }
-            nextUrl.hash = '';
             if (allowedOrigins && !allowedOrigins.has(nextUrl.origin)) {
               throw new JobError('redirect_blocked', 502);
             }
@@ -68,9 +100,14 @@ export function createProxySession(proxy) {
           const { bytes, truncated } = currentMethod === 'HEAD'
             ? (void response.body?.cancel().catch(() => {}), { bytes: new Uint8Array(), truncated: false })
             : await readLimitedWithMeta(response.body, limit, budget, { truncate });
+          let outHeaders = response.headers;
+          if (redirectCookies.length) {
+            outHeaders = new Headers(response.headers);
+            for (const c of redirectCookies) outHeaders.append('set-cookie', c);
+          }
           return {
             status: response.status,
-            headers: response.headers,
+            headers: outHeaders,
             bytes,
             truncated,
             finalUrl: currentUrl,

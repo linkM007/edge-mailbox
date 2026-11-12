@@ -5,7 +5,12 @@
   "define": { "__dirname": "\"/\"" },
   "alias": {
     "./proxy.js": "./egress/proxy-worker.js",
+    "../egress/proxy.js": "./egress/proxy-worker.js",
     "./crypto/poly1305.js": "./node_modules/ssh2/lib/protocol/crypto/poly1305.worker.js",
+    "./vendor/chacha20poly1305.js": "./node_modules/tunnelfetch/src/profile/vendor/chacha20poly1305.worker.js",
+    "./vendor/mlkem768.js": "./node_modules/tunnelfetch/src/profile/vendor/mlkem768.worker.js",
+    "./vendor/brotli-dec.js": "./node_modules/tunnelfetch/src/profile/vendor/brotli-dec.worker.js",
+    "./vendor/zstd-dec.js": "./node_modules/tunnelfetch/src/profile/vendor/zstd-dec.worker.js",
     "cpu-features": "./src/no-native.cjs",
     "./crypto/build/Release/sshcrypto.node": "./src/no-native.cjs"
   },
