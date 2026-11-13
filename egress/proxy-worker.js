@@ -3,6 +3,7 @@ import { Client } from 'tunnelfetch';
 import { chrome } from 'tunnelfetch/profile/chrome';
 import { JobError, readLimitedWithMeta } from '../src/protocol.js';
 import { publicJobHttpsUrl } from '../src/url-policy.js';
+import { applyRedirectHop, createRedirectState, getSetCookieList } from './redirect-cookies.js';
 export { proxyTunnel, directTunnel } from './proxy-tunnel.js';
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -32,6 +33,7 @@ export function createProxySession(proxy) {
       let currentHeaders = headers ? { ...headers } : undefined;
       let redirects = 0;
       const redirectCookies = [];
+      const redirectState = createRedirectState(url, currentHeaders);
       try {
         while (true) {
           const response = await client.fetch(currentUrl, {
@@ -70,9 +72,7 @@ export function createProxySession(proxy) {
                 redirectCount: redirects,
               };
             }
-            const hopCookies = typeof response.headers.getSetCookie === 'function'
-              ? response.headers.getSetCookie()
-              : (response.headers.get('set-cookie') ? [response.headers.get('set-cookie')] : []);
+            const hopCookies = getSetCookieList(response.headers);
             for (const c of hopCookies) redirectCookies.push(c);
             const location = response.headers.get('location');
             void response.body?.cancel().catch(() => {});
@@ -93,6 +93,7 @@ export function createProxySession(proxy) {
                 delete currentHeaders['content-length'];
               }
             }
+            currentHeaders = applyRedirectHop(redirectState, currentUrl, nextUrl, hopCookies, currentHeaders);
             currentUrl = nextUrl.href;
             redirects++;
             continue;
@@ -117,11 +118,13 @@ export function createProxySession(proxy) {
       } catch (error) {
         if (signal?.aborted) throw new JobError('job_timeout', 504);
         if (error instanceof JobError) throw error;
+        const detailRaw = [error.code ?? error.name, error.detail?.name].filter(Boolean).join(':');
+        const safeCode = detailRaw.replace(/[^A-Za-z0-9_:-]/g, '').slice(0, 64);
         console.error(JSON.stringify({
           event: 'proxy_error',
-          code: String(error.code ?? error.name).replace(/[^A-Za-z0-9_]/g, '').slice(0, 80),
+          code: safeCode,
         }));
-        throw new JobError('proxy_request_failed', 502);
+        throw new JobError('proxy_request_failed', 502, safeCode || undefined);
       }
     },
     async close() {

@@ -5,6 +5,8 @@ export function validateRelativePath(path) {
 
 export const VERSION = '0.4.0';
 export const INPUT_LIMIT = 4096;
+export const RUN_INPUT_LIMIT = 131072;
+export const MAX_HTTP_BODY_CHARS = 65536;
 export const OUTPUT_LIMIT = 32768;
 export const MAX_HTTP_BYTES = 1048576;
 export const JOB_TIMEOUT_MS = 15000;
@@ -23,10 +25,13 @@ const FORBIDDEN_JOB_HEADERS = new Set([
 ]);
 
 export class JobError extends Error {
-  constructor(code, status = 400) {
+  constructor(code, status = 400, detail = undefined) {
     super(code);
     this.code = code;
     this.status = status;
+    if (typeof detail === 'string' && /^[A-Za-z0-9_:-]{1,80}$/.test(detail)) {
+      this.detail = detail;
+    }
   }
 }
 
@@ -112,7 +117,7 @@ export function validateJob(job) {
     }
     const headers = job.headers !== undefined ? validateJobHeaders(job.headers) : undefined;
     if (job.body !== undefined) {
-      if (typeof job.body !== 'string' || job.body.length > 3072 || ['GET', 'HEAD'].includes(method)) {
+      if (typeof job.body !== 'string' || job.body.length > MAX_HTTP_BODY_CHARS || ['GET', 'HEAD'].includes(method)) {
         throw new JobError('invalid_job');
       }
       if (job.bodyEncoding === 'base64' && (!/^[A-Za-z0-9+/]*={0,2}$/.test(job.body) || job.body.length % 4 !== 0)) {

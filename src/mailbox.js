@@ -1,5 +1,5 @@
 import { executeJob } from './executor.js';
-import { JOB_STATUSES, JobError, RESULT_LIMIT, publicError, publicJob, publicJobSummary, validateId, validateJob } from './protocol.js';
+import { INPUT_LIMIT, JOB_STATUSES, JobError, RESULT_LIMIT, publicError, publicJob, publicJobSummary, validateId, validateJob } from './protocol.js';
 
 export const INSERT_JOB = `INSERT INTO jobs (id, payload)
   SELECT ?, ? WHERE (SELECT count(*) FROM jobs WHERE status IN ('pending', 'running')) < 100
@@ -18,6 +18,7 @@ const CLAIM_JOB = `UPDATE jobs SET status = 'running', lease_until = unixepoch()
 export async function enqueue(db, id, input) {
   validateId(id);
   const payload = JSON.stringify(validateJob(input));
+  if (new TextEncoder().encode(payload).byteLength > INPUT_LIMIT) throw new JobError('size_limit_exceeded', 413);
   await db.prepare(INSERT_JOB).bind(id, payload).run();
   const row = await db.prepare(SELECT_JOB).bind(id).first();
   if (!row) throw new JobError('mailbox_full', 429);

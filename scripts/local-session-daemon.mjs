@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 import { fetch } from 'undici';
 import { createDispatcher } from '../cli/client.js';
+import { browse } from '../egress/browser.js';
 import { runBrowserSession } from '../egress/session-browser.js';
 import { JobError } from '../src/protocol.js';
 
@@ -16,12 +17,15 @@ if (existsSync(defaultEnv) && !process.env.EDGE_RPC_TOKEN) process.loadEnvFile(d
 const endpoint = (process.env.EDGE_ENDPOINT || '').replace(/\/+$/, '');
 const token = process.env.EDGE_RPC_TOKEN || '';
 const port = Number(process.env.LOCAL_SESSION_PORT || 18921);
+const idleMs = Number(process.env.LOCAL_SESSION_IDLE_MS || 300000);
 const chromeBin = process.env.CHROME_EXECUTABLE || '/usr/bin/google-chrome';
 
 if (!endpoint || !token) throw new Error('missing_EDGE_ENDPOINT_or_EDGE_RPC_TOKEN');
 
 const dispatcher = createDispatcher();
 const browsers = new Map();
+let activeRequests = 0;
+let lastActivityAt = Date.now();
 
 function makeRemoteProxySession(proxyName) {
   return {
@@ -70,21 +74,58 @@ function makeRemoteProxySession(proxyName) {
   };
 }
 
+function launchLocalChromium() {
+  return chromium.launch({
+    executablePath: chromeBin,
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-quic',
+      '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+      '--proxy-server=http://127.0.0.1:1',
+    ],
+  });
+}
+
 const server = http.createServer(async (req, res) => {
+  lastActivityAt = Date.now();
   if (req.method === 'GET' && req.url === '/healthz') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, sessions: browsers.size }));
+    res.end(JSON.stringify({ ok: true, mode: 'playwright', sessions: browsers.size }));
     return;
   }
-  if (req.method !== 'POST' || req.url !== '/v1/browser') {
+  if (req.method !== 'POST' || (req.url !== '/v1/browser' && req.url !== '/v1/browse')) {
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'not_found' }));
     return;
   }
+  activeRequests++;
   try {
     const chunks = [];
     for await (const c of req) chunks.push(c);
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (req.url === '/v1/browse') {
+      const proxySession = makeRemoteProxySession(input.proxy);
+      const result = await browse(
+        input,
+        {
+          allowDynamicUrls: true,
+          defaultProxy: 'default',
+          proxies: { default: { host: '127.0.0.1', port: 1, protocol: 'http:' } },
+          browserTargets: {},
+        },
+        {
+          launch: () => launchLocalChromium(),
+          timeoutMs: 60000,
+          requestResource: (url, _proxy, options) => proxySession.fetch(url, { ...options, returnOnRedirect: false }),
+        },
+      );
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ requestId: crypto.randomUUID(), result }));
+      return;
+    }
     const result = await runBrowserSession(
       input,
       { allowDynamicUrls: true },
@@ -94,17 +135,7 @@ const server = http.createServer(async (req, res) => {
         makeProxySession: makeRemoteProxySession,
         acquireSession: async () => {
           const id = 'local-' + crypto.randomUUID().slice(0, 12);
-          const browser = await chromium.launch({
-            executablePath: chromeBin,
-            headless: true,
-            args: [
-              '--no-sandbox',
-              '--disable-setuid-sandbox',
-              '--disable-dev-shm-usage',
-              '--disable-quic',
-              '--proxy-server=http://127.0.0.1:1',
-            ],
-          });
+          const browser = await launchLocalChromium();
           browsers.set(id, browser);
           browser.on('disconnected', () => browsers.delete(id));
           return { sessionId: id };
@@ -122,8 +153,20 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     res.writeHead(err?.status || 500, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: err?.code || String(err?.message || 'daemon_error') }));
+  } finally {
+    activeRequests--;
+    lastActivityAt = Date.now();
   }
 });
+
+if (idleMs > 0) {
+  setInterval(async () => {
+    if (activeRequests === 0 && browsers.size === 0 && Date.now() - lastActivityAt > idleMs) {
+      server.close();
+      process.exit(0);
+    }
+  }, 15000).unref();
+}
 
 server.listen(port, '127.0.0.1', () => {
   console.log(JSON.stringify({ event: 'local_session_daemon_listening', host: '127.0.0.1', port }));

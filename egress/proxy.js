@@ -1,6 +1,7 @@
 import { ProxyAgent, fetch } from 'undici';
 import { JobError, readLimitedWithMeta } from '../src/protocol.js';
 import { publicJobHttpsUrl } from '../src/url-policy.js';
+import { applyRedirectHop, createRedirectState, getSetCookieList } from './redirect-cookies.js';
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
@@ -22,6 +23,8 @@ export function createProxySession(proxy) {
       let currentBody = body;
       let currentHeaders = headers ? { ...headers } : undefined;
       let redirects = 0;
+      const redirectCookies = [];
+      const redirectState = createRedirectState(url, currentHeaders);
       try {
         while (true) {
           const response = await fetch(currentUrl, {
@@ -34,9 +37,14 @@ export function createProxySession(proxy) {
           });
           if (response.status === 304) {
             void response.body?.cancel().catch(() => {});
+            let outHeaders = response.headers;
+            if (redirectCookies.length) {
+              outHeaders = new Headers(response.headers);
+              for (const c of redirectCookies) outHeaders.append('set-cookie', c);
+            }
             return {
               status: 304,
-              headers: response.headers,
+              headers: outHeaders,
               bytes: new Uint8Array(),
               truncated: false,
               finalUrl: currentUrl,
@@ -55,6 +63,8 @@ export function createProxySession(proxy) {
                 redirectCount: redirects,
               };
             }
+            const hopCookies = getSetCookieList(response.headers);
+            for (const c of hopCookies) redirectCookies.push(c);
             const location = response.headers.get('location');
             void response.body?.cancel().catch(() => {});
             if (!REDIRECT_STATUSES.has(response.status) || redirects >= maxRedirects || !location) {
@@ -74,6 +84,7 @@ export function createProxySession(proxy) {
                 delete currentHeaders['content-length'];
               }
             }
+            currentHeaders = applyRedirectHop(redirectState, currentUrl, nextUrl, hopCookies, currentHeaders);
             currentUrl = nextUrl.href;
             redirects++;
             continue;
@@ -81,9 +92,14 @@ export function createProxySession(proxy) {
           const { bytes, truncated } = currentMethod === 'HEAD'
             ? (void response.body?.cancel().catch(() => {}), { bytes: new Uint8Array(), truncated: false })
             : await readLimitedWithMeta(response.body, limit, budget, { truncate });
+          let outHeaders = response.headers;
+          if (redirectCookies.length) {
+            outHeaders = new Headers(response.headers);
+            for (const c of redirectCookies) outHeaders.append('set-cookie', c);
+          }
           return {
             status: response.status,
-            headers: response.headers,
+            headers: outHeaders,
             bytes,
             truncated,
             finalUrl: currentUrl,

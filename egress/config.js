@@ -3,14 +3,45 @@ import { publicHostOrIp, publicHttpsUrl, publicJobHttpsUrl } from '../src/url-po
 
 const HEADER_NAME_PATTERN = /^[a-zA-Z0-9!#$%&'*+.^_`|~-]{1,64}$/;
 const SECRET_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
-const DEFAULT_DYNAMIC_HTTP_HEADERS = {
-  accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.9,*/*;q=0.8',
-  'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8',
-  'sec-fetch-dest': 'document',
-  'sec-fetch-mode': 'navigate',
-  'sec-fetch-site': 'none',
+const CHROME_DYNAMIC_BASE_HEADERS = {
+  'sec-ch-ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
   'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+  'accept-language': 'en-US,en;q=0.9,zh-CN;q=0.8',
 };
+
+function defaultDynamicHttpHeaders(job) {
+  const method = (job.method ?? 'GET').toUpperCase();
+  let callerAccept = '';
+  if (job.headers) {
+    for (const [k, v] of Object.entries(job.headers)) {
+      if (k.toLowerCase() === 'accept') callerAccept = String(v).toLowerCase();
+    }
+  }
+  const isDocNav = ['GET', 'HEAD'].includes(method) && job.body === undefined &&
+    (!callerAccept || callerAccept.includes('text/html'));
+  if (isDocNav) {
+    return {
+      ...CHROME_DYNAMIC_BASE_HEADERS,
+      'upgrade-insecure-requests': '1',
+      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'sec-fetch-site': 'none',
+      'sec-fetch-mode': 'navigate',
+      'sec-fetch-user': '?1',
+      'sec-fetch-dest': 'document',
+      priority: 'u=0, i',
+    };
+  }
+  return {
+    ...CHROME_DYNAMIC_BASE_HEADERS,
+    accept: 'application/json, text/plain, */*',
+    'sec-fetch-site': 'none',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-dest': 'empty',
+    priority: 'u=1, i',
+  };
+}
 
 function parseProxyEntry(raw, env) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new JobError('invalid_egress_proxy', 503);
@@ -156,7 +187,7 @@ export function resolveGatewayJob(input, config) {
       const method = job.method ?? 'GET';
       const followRedirects = job.followRedirects ?? true;
       const maxRedirects = followRedirects ? 10 : 0;
-      const headers = resolveHttpHeaders({ headers: DEFAULT_DYNAMIC_HTTP_HEADERS }, job, config.secrets, true);
+      const headers = resolveHttpHeaders({ headers: defaultDynamicHttpHeaders(job) }, job, config.secrets, true);
       const proxy = resolveProxy(config, job.proxy);
       return {
         job,

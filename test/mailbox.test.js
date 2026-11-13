@@ -105,7 +105,8 @@ function req(path, body, headers = {}) {
 test('Worker authenticates requests and applies bounded input', async () => {
   assert.equal((await handleRequest(req('/v1/run', job, { authorization: '' }), env)).status, 401);
   assert.equal((await handleRequest(req('/v1/run', job), { ...env, RPC_TOKEN: '' })).status, 503);
-  assert.equal((await handleRequest(req('/v1/run', { ...job, extra: 'x'.repeat(4096) }), env)).status, 413);
+  assert.equal((await handleRequest(req('/v1/run', { ...job, extra: 'x'.repeat(131072) }), env)).status, 413);
+  assert.equal((await handleRequest(req('/v1/jobs', { ...job, extra: 'x'.repeat(4096) }), env)).status, 413);
   assert.equal((await handleRequest(req('/v1/run', job, { 'content-type': 'text/plain' }), env)).status, 415);
   const result = await handleRequest(req('/v1/run', job), env, async () => ({ ok: true }));
   assert.equal(result.status, 200);

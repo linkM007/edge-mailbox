@@ -1,6 +1,6 @@
 import { executeBrowserSession, executeJob, executeProxyFetch, listTargets, resolveJob } from './executor.js';
 import { cancelJob, enqueue, listJobs, processMailbox, SELECT_JOB } from './mailbox.js';
-import { INPUT_LIMIT, JobError, VERSION, publicError, publicJob, readLimited, validateId } from './protocol.js';
+import { INPUT_LIMIT, JobError, RUN_INPUT_LIMIT, VERSION, publicError, publicJob, readLimited, validateId } from './protocol.js';
 
 function json(value, status = 200) {
   return Response.json(value, { status, headers: {
@@ -21,11 +21,11 @@ async function authenticate(request, env) {
   if (diff !== 0) throw new JobError('unauthenticated', 401);
 }
 
-async function requestJob(request) {
+async function requestJob(request, limit = INPUT_LIMIT) {
   if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
     throw new JobError('json_required', 415);
   }
-  const bytes = await readLimited(request.body, INPUT_LIMIT);
+  const bytes = await readLimited(request.body, limit);
   try { return JSON.parse(new TextDecoder().decode(bytes)); }
   catch { throw new JobError('invalid_json'); }
 }
@@ -111,7 +111,7 @@ export async function handleRequest(request, env, execute = executeJob, ctx = nu
       return json({ requestId, result: await executeBrowserSession(input, env) });
     }
     if (path === '/v1/run' && request.method === 'POST') {
-      const input = await requestJob(request);
+      const input = await requestJob(request, RUN_INPUT_LIMIT);
       resolveJob(input, env);
       return json({ requestId, result: await execute(input, env) });
     }
@@ -125,7 +125,7 @@ export async function handleRequest(request, env, execute = executeJob, ctx = nu
       return json({ requestId, jobs: await listJobs(env.DB, { status, limit }) });
     }
     if (path === '/v1/jobs' && request.method === 'POST') {
-      const input = await requestJob(request);
+      const input = await requestJob(request, INPUT_LIMIT);
       resolveJob(input, env);
       const id = request.headers.get('idempotency-key') ?? crypto.randomUUID();
       const job = await enqueue(env.DB, id, input);
@@ -146,7 +146,11 @@ export async function handleRequest(request, env, execute = executeJob, ctx = nu
     }
     throw new JobError('route_not_found', 404);
   } catch (error) {
-    return json({ requestId, error: publicError(error) }, error instanceof JobError ? error.status : 502);
+    return json({
+      requestId,
+      error: publicError(error),
+      ...(error instanceof JobError && error.detail ? { detail: error.detail } : {}),
+    }, error instanceof JobError ? error.status : 502);
   }
 }
 
