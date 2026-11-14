@@ -164,3 +164,22 @@ test('Synchronous /v1/run accepts 32 KiB POST payloads', async () => {
   const data = await res.json();
   assert.equal(data.result.receivedLen, bigBody.length);
 });
+
+test('URL policy accepts Punycode IDN TLDs while rejecting reserved/internal suffixes', async () => {
+  const { publicHostname, publicJobHttpsUrl } = await import('../src/url-policy.js');
+  assert.equal(publicHostname('nic.xn--fiqs8s'), true); // .中国
+  assert.equal(publicHostname('www.xn--j6w193g'), true); // .香港
+  assert.equal(publicJobHttpsUrl('https://nic.中国/about').hostname, 'nic.xn--fiqs8s');
+  assert.equal(publicHostname('intranet'), false);
+  assert.equal(publicHostname('app.localhost'), false);
+  assert.equal(publicHostname('db.internal'), false);
+  assert.equal(publicHostname('127.0.0.1'), false);
+});
+
+test('tunnelfetch warmup() succeeds cleanly with GREASE/HRR and system chain cache patches applied', async () => {
+  const { warmup } = await import('tunnelfetch');
+  const report = await warmup({ iterations: 2 });
+  assert.equal(report.ok, true, report.error ?? 'warmup failed');
+  assert.equal(report.iterations, 2);
+});
+

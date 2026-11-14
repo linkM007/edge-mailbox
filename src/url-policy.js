@@ -2,7 +2,7 @@ import { JobError, validateRelativePath } from './protocol.js';
 export { validateRelativePath };
 
 export function publicHostname(hostname) {
-  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(hostname) &&
+  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,58}[a-z0-9])$/i.test(hostname) &&
     !/\.(localhost|local|internal|test|invalid)$/i.test(hostname);
 }
 

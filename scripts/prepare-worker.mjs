@@ -198,3 +198,75 @@ if (!hsDriver.includes('isRetry: true,')) {
   hsDriver = hsDriver.replace(beforeRetry, afterRetry);
   await writeFile(hsPath, hsDriver);
 }
+
+// 4. Patch tunnelfetch@1.13.1 system trust verification with a bounded isolate-level verified
+//    chain + OCSP cache (max 128 entries, 5-minute TTL bounded by leaf.notAfter) so multi-hop
+//    redirects and /v1/proxy-fetch asset bursts stay comfortably inside Cloudflare Workers' 10ms
+//    Free Plan CPU ceiling without weakening X.509 or OCSP revocation enforcement.
+const trustIndexPath = join(tfRoot, 'src/trust/index.js');
+let trustIndex = await readFile(trustIndexPath, 'utf8');
+if (!trustIndex.includes('_verifiedSystemChainCache')) {
+  const beforeVerify = [
+    '  const revocation = revocationPolicy(trust, mode);',
+    '',
+    '  const { leaf, path, anchor } = await validatePath({ chain, anchors, hostname, now });',
+    '  if (pins) await checkPins(pins, path, anchor);',
+    '  await checkRevocation({ ocspResponse, revocation, leaf, path, anchor, hostname, now });',
+    '  return leaf;',
+    '}',
+  ].join('\n');
+  const afterVerify = [
+    '  const revocation = revocationPolicy(trust, mode);',
+    '',
+    '  let cacheKey = null;',
+    "  if (mode === 'system' && !pins) {",
+    '    cacheKey = await _systemChainCacheKey(hostname, revocation, chain, ocspResponse);',
+    '    const hit = _verifiedSystemChainCache.get(cacheKey);',
+    '    if (hit && now >= hit.leaf.notBefore && now < hit.expiresAt) return hit.leaf;',
+    '  }',
+    '',
+    '  const { leaf, path, anchor } = await validatePath({ chain, anchors, hostname, now });',
+    '  if (pins) await checkPins(pins, path, anchor);',
+    '  await checkRevocation({ ocspResponse, revocation, leaf, path, anchor, hostname, now });',
+    '  if (cacheKey) {',
+    '    const expiresAt = Math.min(now + 300000, leaf.notAfter);',
+    '    if (expiresAt > now) {',
+    '      if (_verifiedSystemChainCache.size >= 128) {',
+    '        const oldest = _verifiedSystemChainCache.keys().next().value;',
+    '        if (oldest !== undefined) _verifiedSystemChainCache.delete(oldest);',
+    '      }',
+    '      _verifiedSystemChainCache.set(cacheKey, { leaf, expiresAt });',
+    '    }',
+    '  }',
+    '  return leaf;',
+    '}',
+    '',
+    'const _verifiedSystemChainCache = new Map();',
+    'const _cacheTextEncoder = new TextEncoder();',
+    'async function _systemChainCacheKey(hostname, revocation, chain, ocspResponse) {',
+    '  const meta = _cacheTextEncoder.encode(`${hostname.toLowerCase()}\\0${revocation}\\0${chain.length}\\0`);',
+    '  let total = meta.byteLength + 4 + (ocspResponse ? ocspResponse.byteLength : 0);',
+    '  for (const der of chain) total += 4 + der.byteLength;',
+    '  const buf = new Uint8Array(total);',
+    '  const view = new DataView(buf.buffer);',
+    '  let off = 0;',
+    '  buf.set(meta, off); off += meta.byteLength;',
+    '  for (const der of chain) {',
+    '    view.setUint32(off, der.byteLength); off += 4;',
+    '    buf.set(der, off); off += der.byteLength;',
+    '  }',
+    '  view.setUint32(off, ocspResponse ? ocspResponse.byteLength : 0xffffffff); off += 4;',
+    '  if (ocspResponse) buf.set(ocspResponse, off);',
+    "  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));",
+    '  let hex = "";',
+    '  for (let i = 0; i < digest.length; i++) hex += digest[i].toString(16).padStart(2, "0");',
+    '  return `${hostname.toLowerCase()}|${revocation}|${hex}`;',
+    '}',
+  ].join('\n');
+  if (!trustIndex.includes(beforeVerify)) {
+    throw new Error('Pinned tunnelfetch trust/index.js changed; review chain cache patch.');
+  }
+  trustIndex = trustIndex.replace(beforeVerify, afterVerify);
+  await writeFile(trustIndexPath, trustIndex);
+}
+

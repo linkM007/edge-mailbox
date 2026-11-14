@@ -197,10 +197,39 @@ export async function runBrowserSession(
           try { Object.defineProperty(window, name, { value: undefined, configurable: true, writable: false }); } catch {}
         }
         try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch {}
+        const stripBlank = ev => {
+          const a = ev.target && typeof ev.target.closest === 'function' ? ev.target.closest('a[target]') : null;
+          if (!a) return;
+          const t = (a.getAttribute('target') || '').toLowerCase();
+          if ((t === '_blank' || t === '_new') && a.href && /^https:\/\//i.test(a.href)) {
+            a.removeAttribute('target');
+          }
+        };
+        document.addEventListener('mousedown', stripBlank, true);
+        document.addEventListener('click', stripBlank, true);
+        window.open = function(url) {
+          if (typeof url === 'string' && url.length > 0) {
+            try {
+              const resolved = new URL(url, location.href);
+              if (resolved.protocol === 'https:') location.assign(resolved.href);
+            } catch {}
+          }
+          return window;
+        };
       }).catch(() => {});
     }
 
     page.on('dialog', dialog => { void dialog.dismiss().catch(() => {}); });
+
+    const registrableDomain = host => {
+      const parts = String(host || '').toLowerCase().split('.').filter(Boolean);
+      if (parts.length <= 2) return parts.join('.');
+      const tail2 = parts.slice(-2).join('.');
+      if (/^(co|com|org|net|gov|edu|ac|or|ne|go)\.[a-z]{2}$/.test(tail2) && parts.length >= 3) {
+        return parts.slice(-3).join('.');
+      }
+      return tail2;
+    };
 
     const networkLog = [];
     await context.route('**/*', route => withSlot(async () => {
@@ -276,7 +305,7 @@ export async function runBrowserSession(
             outHeaders['sec-fetch-site'] = 'none';
           } else if (frameUrl && frameUrl.origin === targetUrl.origin) {
             outHeaders['sec-fetch-site'] = 'same-origin';
-          } else if (frameUrl && frameUrl.hostname.split('.').slice(-2).join('.') === targetUrl.hostname.split('.').slice(-2).join('.')) {
+          } else if (frameUrl && registrableDomain(frameUrl.hostname) === registrableDomain(targetUrl.hostname)) {
             outHeaders['sec-fetch-site'] = 'same-site';
           } else {
             outHeaders['sec-fetch-site'] = 'cross-site';
